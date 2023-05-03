@@ -137,27 +137,27 @@ impl ConnectionInner {
     }
   }
 
-  pub async fn keepalive_or_stop(self: Rc<Self>) {
-    loop {
-      if self.is_stopping() {
-        break;
-      }
+  // pub async fn keepalive_or_stop(self: Rc<Self>) {
+  //   loop {
+  //     if self.is_stopping() {
+  //       break;
+  //     }
 
-      if !self.is_connected() {
-        self.connected_event.wait().await;
-      }
+  //     if !self.is_connected() {
+  //       self.connected_event.wait().await;
+  //     }
 
-      if let Err(err) =
-        self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("!"))).await
-      {
-        log::error!("Failed to send ping: err: {}", &err);
-      } else {
-        log::debug!("Ping sent");
-      }
+  //     if let Err(err) =
+  //       self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("!"))).await
+  //     {
+  //       log::error!("Failed to send ping: err: {}", &err);
+  //     } else {
+  //       log::debug!("Ping sent");
+  //     }
 
-      sleep(Duration::from_secs(10)).await;
-    }
-  }
+  //     sleep(Duration::from_secs(10)).await;
+  //   }
+  // }
 
   pub async fn send(self: Rc<Self>, mut msg: ProtocolMsg) -> Result<ProtocolMsg, SendError> {
     let round_ref = self.next_round_ref();
@@ -200,8 +200,19 @@ impl ConnectionInner {
                 attachment.waker.as_ref().unwrap().wake_by_ref();
               }
             }
-            Frame::Ping(p) | Frame::Pong(p) => {
-              log::debug!("Ping sent {:?}", p);
+            Frame::Ping(ping) => {
+              if let Err(err) =
+                self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Pong(ping)).await
+              {
+                log::error!("Failed to send pong: err: {}", &err);
+              }
+            }
+            Frame::Pong(pong) => {
+              if let Err(err) =
+                self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Pong(pong)).await
+              {
+                log::error!("Failed to send ping: err: {}", &err);
+              }
             }
             Frame::Close(reason) => {
               log::error!("Disconnected: actor: {}<{}>, err: {:?}", &self.url, &self.id, &reason);
@@ -357,7 +368,7 @@ impl Actor for Connection {
   fn started(&mut self, ctx: &mut Self::Context) {
     log::info!("Started: actor: {}<{}>", &self.inner.url, &self.inner.id);
     Box::pin(Rc::clone(&self.inner).connect_repeatedly().into_actor(self)).spawn(ctx);
-    Box::pin(Rc::clone(&self.inner).keepalive_or_stop().into_actor(self)).spawn(ctx);
+    // Box::pin(Rc::clone(&self.inner).keepalive_or_stop().into_actor(self)).spawn(ctx);
     Box::pin(Rc::clone(&self.inner).receive_repeatedly().into_actor(self)).spawn(ctx);
   }
 
