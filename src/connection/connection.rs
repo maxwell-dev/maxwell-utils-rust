@@ -148,9 +148,11 @@ impl ConnectionInner {
       }
 
       if let Err(err) =
-        self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from(""))).await
+        self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("&*()"))).await
       {
-        log::error!("Failed to ping: err: {}", &err);
+        log::error!("Failed to send ping: err: {}", &err);
+      } else {
+        log::debug!("Ping sent");
       }
 
       sleep(Duration::from_secs(10)).await;
