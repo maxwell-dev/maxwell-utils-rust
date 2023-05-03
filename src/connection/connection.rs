@@ -148,7 +148,7 @@ impl ConnectionInner {
       }
 
       if let Err(err) =
-        self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("&*()"))).await
+        self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("!"))).await
       {
         log::error!("Failed to send ping: err: {}", &err);
       } else {
@@ -200,7 +200,9 @@ impl ConnectionInner {
                 attachment.waker.as_ref().unwrap().wake_by_ref();
               }
             }
-            Frame::Ping(_) | Frame::Pong(_) => {}
+            Frame::Ping(p) | Frame::Pong(p) => {
+              log::debug!("Ping sent {:?}", p);
+            }
             Frame::Close(reason) => {
               log::error!("Disconnected: actor: {}<{}>, err: {:?}", &self.url, &self.id, &reason);
               self.toggle_to_disconnected();
