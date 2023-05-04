@@ -14,20 +14,18 @@ use actix_web_actors::ws::{Frame, Message as WSMessage};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use awc::{ws::Codec, BoxedSocket, Client};
 use bytes::Bytes;
-use futures::future::{AbortHandle, Abortable};
 use futures_intrusive::sync::LocalManualResetEvent;
 use futures_util::{
   sink::SinkExt,
   stream::{SplitSink, SplitStream, StreamExt},
 };
 use maxwell_protocol::{self, ProtocolMsg, SendError, *};
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
-// use super::Connection;
+use super::Connection;
 use super::ConnectionOptions;
 use super::NextMsgRefMsg;
 use super::StopMsg;
-use super::TimeoutExt;
 use super::MAX_MSG_REF;
 use crate::prelude::ArbiterPool;
 
@@ -381,7 +379,7 @@ impl ConnectionFull {
   }
 }
 
-// impl Connection for ConnectionFull {}
+impl Connection for ConnectionFull {}
 
 impl Actor for ConnectionFull {
   type Context = Context<Self>;
@@ -406,22 +404,11 @@ impl Actor for ConnectionFull {
   }
 }
 
-// impl Handler<ProtocolMsg> for ConnectionFull {
-//   type Result = ResponseFuture<Result<ProtocolMsg, SendError>>;
-
-//   #[inline]
-//   fn handle(&mut self, msg: ProtocolMsg, _ctx: &mut Context<Self>) -> Self::Result {
-//     Box::pin(Rc::clone(&self.inner).send(msg))
-//   }
-// }
-
-impl actix::Handler<maxwell_protocol::ProtocolMsg> for ConnectionFull {
-  type Result = ResponseFuture<Result<maxwell_protocol::ProtocolMsg, SendError>>;
+impl Handler<ProtocolMsg> for ConnectionFull {
+  type Result = ResponseFuture<Result<ProtocolMsg, SendError>>;
 
   #[inline]
-  fn handle(
-    &mut self, msg: maxwell_protocol::ProtocolMsg, _ctx: &mut Context<Self>,
-  ) -> Self::Result {
+  fn handle(&mut self, msg: ProtocolMsg, _ctx: &mut Context<Self>) -> Self::Result {
     Box::pin(Rc::clone(&self.inner).send(msg))
   }
 }
@@ -475,38 +462,6 @@ impl Handler<UnsubscribeConnectionStatusMsg> for ConnectionFull {
     &mut self, msg: UnsubscribeConnectionStatusMsg, _ctx: &mut Context<Self>,
   ) -> Self::Result {
     self.inner.unsubscribe(msg.0);
-  }
-}
-
-impl TimeoutExt for Request<ConnectionFull, ProtocolMsg> {
-  type Result = Pin<Box<dyn Future<Output = Result<ProtocolMsg, SendError>> + Send>>;
-
-  fn timeout_ext(self, dur: Duration) -> Self::Result {
-    Box::pin(async move {
-      let (abort_handle, abort_registration) = AbortHandle::new_pair();
-      let res = timeout(dur, Abortable::new(self, abort_registration)).await;
-      match res {
-        Ok(res) => match res {
-          Ok(res) => match res {
-            Ok(res) => match res {
-              Ok(res) => Ok(res),
-              Err(err) => Err(err),
-            },
-            Err(err) => match err {
-              MailboxError::Timeout => Err(SendError::Timeout),
-              MailboxError::Closed => Err(SendError::Closed),
-            },
-          },
-          // Aborted
-          Err(_err) => Err(SendError::Timeout),
-        },
-        // Elapsed(())
-        Err(_err) => {
-          abort_handle.abort();
-          Err(SendError::Timeout)
-        }
-      }
-    })
   }
 }
 

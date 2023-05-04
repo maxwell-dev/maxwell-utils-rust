@@ -95,7 +95,8 @@ mod tests {
 
   #[actix::test]
   async fn fetch_with() {
-    let connection_pool: ConnectionPool<ConnectionFull> = ConnectionPool::new(Options::default());
+    let connection_pool: ConnectionPool<ConnectionFull> =
+      ConnectionPool::new(PoolOptions::default());
     let endpoint = "localhost:8081";
     let mut connections: Vec<Arc<Addr<ConnectionFull>>> = Vec::new();
     let start = Instant::now();
