@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use actix::{prelude::*, Message as ActixMessage};
 
-pub trait Connection: Actor {}
+trait Connection: Actor {}
 
 #[derive(Debug, Clone)]
 pub struct Options {

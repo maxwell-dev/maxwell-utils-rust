@@ -8,7 +8,7 @@ use std::{
   time::Duration,
 };
 
-use actix::{prelude::*, Addr, Message as ActixMessage};
+use actix::{prelude::*, Addr, Handler, Message as ActixMessage};
 use actix_codec::Framed;
 use actix_web_actors::ws::{Frame, Message as WSMessage};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -23,7 +23,7 @@ use futures_util::{
 use maxwell_protocol::{self, ProtocolMsg, SendError, *};
 use tokio::time::{sleep, timeout};
 
-use super::Connection;
+// use super::Connection;
 use super::ConnectionOptions;
 use super::NextMsgRefMsg;
 use super::StopMsg;
@@ -509,9 +509,7 @@ mod tests {
   use actix::prelude::*;
   use maxwell_protocol::IntoEnum;
 
-  use crate::connection::connection_full::{ConnectionFull, NextMsgRefMsg};
-  use crate::connection::ConnectionOptions;
-  use crate::connection::TimeoutExt;
+  use crate::connection::*;
 
   #[actix::test]
   async fn test_send_msg_with_connection_full() {

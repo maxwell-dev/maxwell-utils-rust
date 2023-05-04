@@ -91,8 +91,7 @@ mod tests {
   use tokio::time::sleep;
 
   use super::*;
-  use crate::connection::ConnectionFull;
-  use crate::connection::ConnectionOptions;
+  use crate::connection::*;
 
   #[actix::test]
   async fn fetch_with() {

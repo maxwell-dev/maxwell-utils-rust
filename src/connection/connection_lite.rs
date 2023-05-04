@@ -392,9 +392,7 @@ mod tests {
   use actix::prelude::*;
   use maxwell_protocol::IntoEnum;
 
-  use crate::connection::connection_lite::{ConnectionLite, NextMsgRefMsg};
-  use crate::connection::ConnectionOptions;
-  use crate::connection::TimeoutExt;
+  use crate::connection::*;
 
   struct EventHandler;
   impl super::EventHandler for EventHandler {
