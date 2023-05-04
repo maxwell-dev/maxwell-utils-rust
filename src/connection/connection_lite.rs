@@ -8,7 +8,7 @@ use std::{
   time::Duration,
 };
 
-use actix::{prelude::*, Addr, Message as ActixMessage};
+use actix::{prelude::*, Addr};
 use actix_codec::Framed;
 use actix_web_actors::ws::{Frame, Message as WSMessage};
 use awc::{ws::Codec, BoxedSocket, Client};
@@ -22,9 +22,12 @@ use futures_util::{
 use maxwell_protocol::{self, ProtocolMsg, SendError, *};
 use tokio::time::{sleep, timeout};
 
+use super::Connection;
 use super::ConnectionOptions;
+use super::NextMsgRefMsg;
+use super::StopMsg;
+use super::TimeoutExt;
 use super::MAX_MSG_REF;
-use super::{Connection, TimeoutExt};
 use crate::prelude::ArbiterPool;
 
 static ID_SEED: AtomicU32 = AtomicU32::new(0);
@@ -330,10 +333,6 @@ impl<H: EventHandler> Handler<ProtocolMsg> for ConnectionLite<H> {
   }
 }
 
-#[derive(Debug, ActixMessage)]
-#[rtype(result = "u32")]
-pub struct NextMsgRefMsg;
-
 impl<H: EventHandler> Handler<NextMsgRefMsg> for ConnectionLite<H> {
   type Result = u32;
 
@@ -341,10 +340,6 @@ impl<H: EventHandler> Handler<NextMsgRefMsg> for ConnectionLite<H> {
     self.inner.next_msg_ref()
   }
 }
-
-#[derive(Debug, ActixMessage)]
-#[rtype(result = "()")]
-pub struct StopMsg;
 
 impl<H: EventHandler> Handler<StopMsg> for ConnectionLite<H> {
   type Result = ();

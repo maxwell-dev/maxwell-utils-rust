@@ -24,8 +24,11 @@ use maxwell_protocol::{self, ProtocolMsg, SendError, *};
 use tokio::time::{sleep, timeout};
 
 use super::Connection;
+use super::ConnectionOptions;
+use super::NextMsgRefMsg;
+use super::StopMsg;
+use super::TimeoutExt;
 use super::MAX_MSG_REF;
-use super::{connection::Options as ConnectionOptions, TimeoutExt};
 use crate::prelude::ArbiterPool;
 
 static ID_SEED: AtomicU32 = AtomicU32::new(0);
@@ -412,10 +415,6 @@ impl Handler<ProtocolMsg> for ConnectionFull {
   }
 }
 
-#[derive(Debug, ActixMessage)]
-#[rtype(result = "u32")]
-pub struct NextMsgRefMsg;
-
 impl Handler<NextMsgRefMsg> for ConnectionFull {
   type Result = u32;
 
@@ -423,10 +422,6 @@ impl Handler<NextMsgRefMsg> for ConnectionFull {
     self.inner.next_msg_ref()
   }
 }
-
-#[derive(Debug, ActixMessage)]
-#[rtype(result = "()")]
-pub struct StopMsg;
 
 impl Handler<StopMsg> for ConnectionFull {
   type Result = ();

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use actix::Actor;
+use actix::{prelude::*, Message as ActixMessage};
 
 pub trait Connection: Actor {}
 
@@ -15,6 +15,14 @@ impl Default for Options {
     Options { reconnect_delay: 1000, ping_interval: Some(1000) }
   }
 }
+
+#[derive(Debug, ActixMessage)]
+#[rtype(result = "u32")]
+pub struct NextMsgRefMsg;
+
+#[derive(Debug, ActixMessage)]
+#[rtype(result = "()")]
+pub struct StopMsg;
 
 pub trait TimeoutExt {
   type Result;
