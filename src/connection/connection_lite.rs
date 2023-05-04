@@ -305,7 +305,9 @@ impl<H: EventHandler> Actor for ConnectionLite<H> {
   fn started(&mut self, ctx: &mut Self::Context) {
     log::info!("Started: actor: {}<{}>", &self.inner.url, &self.inner.id);
     Box::pin(Rc::clone(&self.inner).connect_repeatedly().into_actor(self)).spawn(ctx);
-    Box::pin(Rc::clone(&self.inner).ping_repeatedly_or_stop().into_actor(self)).spawn(ctx);
+    if self.inner.options.ping_interval.is_some() {
+      Box::pin(Rc::clone(&self.inner).ping_repeatedly_or_stop().into_actor(self)).spawn(ctx);
+    }
     Box::pin(Rc::clone(&self.inner).receive_repeatedly().into_actor(self)).spawn(ctx);
   }
 
