@@ -406,11 +406,22 @@ impl Actor for ConnectionFull {
   }
 }
 
-impl Handler<ProtocolMsg> for ConnectionFull {
-  type Result = ResponseFuture<Result<ProtocolMsg, SendError>>;
+// impl Handler<ProtocolMsg> for ConnectionFull {
+//   type Result = ResponseFuture<Result<ProtocolMsg, SendError>>;
+
+//   #[inline]
+//   fn handle(&mut self, msg: ProtocolMsg, _ctx: &mut Context<Self>) -> Self::Result {
+//     Box::pin(Rc::clone(&self.inner).send(msg))
+//   }
+// }
+
+impl actix::Handler<maxwell_protocol::ProtocolMsg> for ConnectionFull {
+  type Result = ResponseFuture<Result<maxwell_protocol::ProtocolMsg, SendError>>;
 
   #[inline]
-  fn handle(&mut self, msg: ProtocolMsg, _ctx: &mut Context<Self>) -> Self::Result {
+  fn handle(
+    &mut self, msg: maxwell_protocol::ProtocolMsg, _ctx: &mut Context<Self>,
+  ) -> Self::Result {
     Box::pin(Rc::clone(&self.inner).send(msg))
   }
 }
