@@ -1,14 +1,17 @@
 use std::{
   cell::{Cell, RefCell},
-  marker::Unpin,
+  future::Future,
+  pin::Pin,
   rc::Rc,
   sync::atomic::{AtomicU32, Ordering},
+  task::{Context as TaskContext, Poll, Waker},
   time::Duration,
 };
 
 use actix::{prelude::*, Addr, Message as ActixMessage};
 use actix_codec::Framed;
 use actix_web_actors::ws::{Frame, Message as WSMessage};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use awc::{ws::Codec, BoxedSocket, Client};
 use bytes::Bytes;
 use futures_intrusive::sync::LocalManualResetEvent;
@@ -19,25 +22,64 @@ use futures_util::{
 use maxwell_protocol::{self, ProtocolMsg, SendError, *};
 use tokio::time::sleep;
 
+use super::connection::Options as ConnectionOptions;
 use super::Connection;
-use super::ConnectionOptions;
 use super::MAX_MSG_REF;
 use crate::prelude::ArbiterPool;
 
 static ID_SEED: AtomicU32 = AtomicU32::new(0);
 
-pub trait EventHandler: Send + Sync + Unpin + 'static {
-  #[inline]
-  fn on_msg(&self, _msg: ProtocolMsg) {}
-  #[inline]
-  fn on_connected(&self) {}
-  #[inline]
-  fn on_disconnected(&self) {}
-  #[inline]
-  fn on_stopped(&self) {}
+struct Attachment {
+  response: Option<ProtocolMsg>,
+  waker: Option<Waker>,
 }
 
-struct ConnectionLiteInner<H: EventHandler> {
+struct Completer {
+  msg_ref: u32,
+  connection_inner: Rc<ConnectionFullInner>,
+}
+
+impl Completer {
+  fn new(msg_ref: u32, connection_inner: Rc<ConnectionFullInner>) -> Self {
+    connection_inner
+      .attachments
+      .borrow_mut()
+      .insert(msg_ref, Attachment { response: None, waker: None });
+    Completer { msg_ref, connection_inner }
+  }
+}
+
+impl Drop for Completer {
+  fn drop(&mut self) {
+    self.connection_inner.attachments.borrow_mut().remove(&self.msg_ref);
+  }
+}
+
+impl Future for Completer {
+  type Output = ProtocolMsg;
+
+  fn poll(self: Pin<&mut Self>, ctx: &mut TaskContext<'_>) -> Poll<ProtocolMsg> {
+    let mut attachments = self.connection_inner.attachments.borrow_mut();
+    let attachment = attachments.get_mut(&self.msg_ref).unwrap();
+    if let Some(msg) = attachment.response.take() {
+      Poll::Ready(msg)
+    } else {
+      match attachment.waker.as_ref() {
+        None => {
+          attachment.waker = Some(ctx.waker().clone());
+        }
+        Some(waker) => {
+          if !waker.will_wake(ctx.waker()) {
+            attachment.waker = Some(ctx.waker().clone());
+          }
+        }
+      }
+      Poll::Pending
+    }
+  }
+}
+
+struct ConnectionFullInner {
   id: u32,
   url: String,
   options: ConnectionOptions,
@@ -46,15 +88,16 @@ struct ConnectionLiteInner<H: EventHandler> {
   connected_event: LocalManualResetEvent,
   disconnected_event: LocalManualResetEvent,
   is_connected: Cell<bool>,
+  attachments: RefCell<HashMap<u32, Attachment>>,
   msg_ref: Cell<u32>,
+  subscribers: RefCell<HashSet<Recipient<ConnectionStatusChangedMsg>>>,
   is_stopping: Cell<bool>,
-  event_handler: H,
 }
 
-impl<H: EventHandler> ConnectionLiteInner<H> {
+impl ConnectionFullInner {
   #[inline]
-  pub fn new(endpoint: String, options: ConnectionOptions, event_handler: H) -> Self {
-    ConnectionLiteInner {
+  pub fn new(endpoint: String, options: ConnectionOptions) -> Self {
+    ConnectionFullInner {
       id: ID_SEED.fetch_add(1, Ordering::Relaxed),
       url: Self::build_url(&endpoint),
       options,
@@ -63,9 +106,10 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
       connected_event: LocalManualResetEvent::new(false),
       disconnected_event: LocalManualResetEvent::new(true),
       is_connected: Cell::new(false),
-      msg_ref: Cell::new(1),
+      attachments: RefCell::new(HashMap::new()),
+      msg_ref: Cell::new(0),
+      subscribers: RefCell::new(HashSet::new()),
       is_stopping: Cell::new(false),
-      event_handler,
     }
   }
 
@@ -111,7 +155,7 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
         log::error!("Failed to send ping: err: {}", &err);
       }
 
-      sleep(Duration::from_secs(self.options.ping_interval.unwrap() as u64)).await;
+      sleep(Duration::from_millis(self.options.ping_interval.unwrap() as u64)).await;
     }
   }
 
@@ -126,6 +170,8 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
       }
     }
 
+    let completer = Completer::new(msg_ref, Rc::clone(&self));
+
     if !self.is_connected() {
       self.connected_event.wait().await;
     }
@@ -137,7 +183,7 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
       return Err(SendError::Any(Box::new(err)));
     }
 
-    Ok(ProtocolMsg::None)
+    Ok(completer.await)
   }
 
   pub async fn receive_repeatedly(self: Rc<Self>) {
@@ -154,8 +200,13 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
         match res {
           Ok(frame) => match frame {
             Frame::Binary(bytes) => {
-              let msg = maxwell_protocol::decode(&bytes).unwrap();
-              self.event_handler.on_msg(msg);
+              let response = maxwell_protocol::decode(&bytes).unwrap();
+              let msg_ref = maxwell_protocol::get_ref(&response);
+              let mut attachments = self.attachments.borrow_mut();
+              if let Some(attachment) = attachments.get_mut(&msg_ref) {
+                attachment.response = Some(response);
+                attachment.waker.as_ref().unwrap().wake_by_ref();
+              }
             }
             Frame::Ping(ping) => {
               if let Err(err) =
@@ -202,6 +253,17 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
   }
 
   #[inline]
+  pub fn subscribe(&self, r: Recipient<ConnectionStatusChangedMsg>) {
+    self.notify_connected(&r);
+    self.subscribers.borrow_mut().insert(r);
+  }
+
+  #[inline]
+  pub fn unsubscribe(&self, r: Recipient<ConnectionStatusChangedMsg>) {
+    self.subscribers.borrow_mut().remove(&r);
+  }
+
+  #[inline]
   pub fn next_msg_ref(&self) -> u32 {
     let msg_ref = self.msg_ref.get();
     if msg_ref < MAX_MSG_REF {
@@ -236,7 +298,7 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
     self.is_connected.set(true);
     self.connected_event.set();
     self.disconnected_event.reset();
-    self.event_handler.on_connected();
+    self.notify_changed(ConnectionStatusChangedMsg::Connected);
   }
 
   #[inline]
@@ -244,7 +306,7 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
     self.is_connected.set(false);
     self.connected_event.reset();
     self.disconnected_event.set();
-    self.event_handler.on_disconnected();
+    self.notify_changed(ConnectionStatusChangedMsg::Disconnected);
   }
 
   #[inline]
@@ -256,31 +318,51 @@ impl<H: EventHandler> ConnectionLiteInner<H> {
   fn is_stopping(&self) -> bool {
     self.is_stopping.get()
   }
-}
 
-pub struct ConnectionLite<H: EventHandler> {
-  inner: Rc<ConnectionLiteInner<H>>,
-}
-
-impl<H: EventHandler> ConnectionLite<H> {
   #[inline]
-  pub fn new(endpoint: String, options: ConnectionOptions, event_handler: H) -> Self {
-    ConnectionLite { inner: Rc::new(ConnectionLiteInner::new(endpoint, options, event_handler)) }
+  fn notify_changed(&self, status: ConnectionStatusChangedMsg) {
+    let mut unavailables: Vec<Recipient<ConnectionStatusChangedMsg>> = Vec::new();
+    for s in &*self.subscribers.borrow() {
+      if s.connected() {
+        s.do_send(status.clone());
+      } else {
+        unavailables.push(s.clone());
+      }
+    }
+    for s in &unavailables {
+      self.subscribers.borrow_mut().remove(s);
+    }
   }
 
   #[inline]
-  pub fn start3(endpoint: String, options: ConnectionOptions, event_handler: H) -> Addr<Self> {
-    ConnectionLite::start_in_arbiter(&ArbiterPool::singleton().fetch_arbiter(), move |_ctx| {
-      ConnectionLite::new(endpoint, options, event_handler)
+  fn notify_connected(&self, r: &Recipient<ConnectionStatusChangedMsg>) {
+    if self.is_connected() {
+      r.do_send(ConnectionStatusChangedMsg::Connected);
+    }
+  }
+}
+
+pub struct ConnectionFull {
+  inner: Rc<ConnectionFullInner>,
+}
+
+impl ConnectionFull {
+  #[inline]
+  pub fn new(endpoint: String, options: ConnectionOptions) -> Self {
+    ConnectionFull { inner: Rc::new(ConnectionFullInner::new(endpoint, options)) }
+  }
+
+  #[inline]
+  pub fn start2(endpoint: String, options: ConnectionOptions) -> Addr<Self> {
+    ConnectionFull::start_in_arbiter(&ArbiterPool::singleton().fetch_arbiter(), move |_ctx| {
+      ConnectionFull::new(endpoint, options)
     })
   }
 
-  pub fn start4(
-    endpoint: String, options: ConnectionOptions, arbiter: ArbiterHandle, event_handler: H,
+  pub fn start3(
+    endpoint: String, options: ConnectionOptions, arbiter: ArbiterHandle,
   ) -> Addr<Self> {
-    ConnectionLite::start_in_arbiter(&arbiter, move |_ctx| {
-      ConnectionLite::new(endpoint, options, event_handler)
-    })
+    ConnectionFull::start_in_arbiter(&arbiter, move |_ctx| ConnectionFull::new(endpoint, options))
   }
 
   #[inline]
@@ -295,15 +377,17 @@ impl<H: EventHandler> ConnectionLite<H> {
   }
 }
 
-impl<H: EventHandler> Connection for ConnectionLite<H> {}
+impl Connection for ConnectionFull {}
 
-impl<H: EventHandler> Actor for ConnectionLite<H> {
+impl Actor for ConnectionFull {
   type Context = Context<Self>;
 
   fn started(&mut self, ctx: &mut Self::Context) {
     log::info!("Started: actor: {}<{}>", &self.inner.url, &self.inner.id);
     Box::pin(Rc::clone(&self.inner).connect_repeatedly().into_actor(self)).spawn(ctx);
-    Box::pin(Rc::clone(&self.inner).ping_repeatedly_or_stop().into_actor(self)).spawn(ctx);
+    if self.inner.options.ping_interval.is_some() {
+      Box::pin(Rc::clone(&self.inner).ping_repeatedly_or_stop().into_actor(self)).spawn(ctx);
+    }
     Box::pin(Rc::clone(&self.inner).receive_repeatedly().into_actor(self)).spawn(ctx);
   }
 
@@ -318,7 +402,7 @@ impl<H: EventHandler> Actor for ConnectionLite<H> {
   }
 }
 
-impl<H: EventHandler> Handler<ProtocolMsg> for ConnectionLite<H> {
+impl Handler<ProtocolMsg> for ConnectionFull {
   type Result = ResponseFuture<Result<ProtocolMsg, SendError>>;
 
   #[inline]
@@ -331,7 +415,7 @@ impl<H: EventHandler> Handler<ProtocolMsg> for ConnectionLite<H> {
 #[rtype(result = "u32")]
 pub struct NextMsgRefMsg;
 
-impl<H: EventHandler> Handler<NextMsgRefMsg> for ConnectionLite<H> {
+impl Handler<NextMsgRefMsg> for ConnectionFull {
   type Result = u32;
 
   fn handle(&mut self, _msg: NextMsgRefMsg, _ctx: &mut Context<Self>) -> Self::Result {
@@ -343,12 +427,47 @@ impl<H: EventHandler> Handler<NextMsgRefMsg> for ConnectionLite<H> {
 #[rtype(result = "()")]
 pub struct StopMsg;
 
-impl<H: EventHandler> Handler<StopMsg> for ConnectionLite<H> {
+impl Handler<StopMsg> for ConnectionFull {
   type Result = ();
 
   fn handle(&mut self, _msg: StopMsg, ctx: &mut Context<Self>) -> Self::Result {
     log::info!("Received StopMsg: actor: {}<{}>", &self.inner.url, &self.inner.id);
     ctx.stop();
+  }
+}
+
+#[derive(Debug, ActixMessage, Clone, PartialEq, Eq)]
+#[rtype(result = "()")]
+pub enum ConnectionStatusChangedMsg {
+  Connected,
+  Disconnected,
+}
+
+#[derive(Debug, ActixMessage)]
+#[rtype(result = "()")]
+pub struct SubscribeConnectionStatusMsg(pub Recipient<ConnectionStatusChangedMsg>);
+
+impl Handler<SubscribeConnectionStatusMsg> for ConnectionFull {
+  type Result = ();
+
+  fn handle(
+    &mut self, msg: SubscribeConnectionStatusMsg, _ctx: &mut Context<Self>,
+  ) -> Self::Result {
+    self.inner.subscribe(msg.0);
+  }
+}
+
+#[derive(Debug, ActixMessage)]
+#[rtype(result = "()")]
+pub struct UnsubscribeConnectionStatusMsg(pub Recipient<ConnectionStatusChangedMsg>);
+
+impl Handler<UnsubscribeConnectionStatusMsg> for ConnectionFull {
+  type Result = ();
+
+  fn handle(
+    &mut self, msg: UnsubscribeConnectionStatusMsg, _ctx: &mut Context<Self>,
+  ) -> Self::Result {
+    self.inner.unsubscribe(msg.0);
   }
 }
 
@@ -362,30 +481,19 @@ mod tests {
   use actix::prelude::*;
   use maxwell_protocol::IntoEnum;
 
-  use crate::connection::connection_lite::{ConnectionLite, NextMsgRefMsg};
+  use crate::connection::connection_full::{ConnectionFull, NextMsgRefMsg};
   use crate::connection::ConnectionOptions;
   use crate::connection::TimeoutExt;
 
-  struct EventHandler;
-  impl super::EventHandler for EventHandler {
-    fn on_msg(&self, msg: maxwell_protocol::ProtocolMsg) {
-      log::info!("Received msg: {:?}", msg);
-    }
-  }
-
   #[actix::test]
-  async fn test_send_msg_with_connection_lite() {
-    let conn = ConnectionLite::new(
-      String::from("localhost:8081"),
-      ConnectionOptions::default(),
-      EventHandler,
-    )
-    .start();
+  async fn test_send_msg_with_connection_full() {
+    let conn =
+      ConnectionFull::new(String::from("localhost:8081"), ConnectionOptions::default()).start();
     for _ in 1..2 {
       let next_msg_ref = conn.send(NextMsgRefMsg).await.unwrap();
       let msg = maxwell_protocol::PingReq { r#ref: next_msg_ref }.into_enum();
-      let res = conn.send(msg).timeout_ext(Duration::from_millis(3000)).await;
-      println!("with_connection_lite result: {:?}", res);
+      let res = conn.send(msg).timeout_ext(Duration::from_millis(1000)).await;
+      println!("with_connection_full result: {:?}", res);
     }
   }
 }

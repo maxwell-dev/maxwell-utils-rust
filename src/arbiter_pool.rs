@@ -1,7 +1,8 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use actix::prelude::*;
 use dycovec::DycoVec;
 use once_cell::sync::OnceCell;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 static ARBITER_POOL: OnceCell<ArbiterPool> = OnceCell::new();
 
