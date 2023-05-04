@@ -381,7 +381,7 @@ impl ConnectionFull {
   }
 }
 
-impl Connection for ConnectionFull {}
+// impl Connection for ConnectionFull {}
 
 impl Actor for ConnectionFull {
   type Context = Context<Self>;
