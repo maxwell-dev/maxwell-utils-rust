@@ -14,17 +14,18 @@ use actix_web_actors::ws::{Frame, Message as WSMessage};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use awc::{ws::Codec, BoxedSocket, Client};
 use bytes::Bytes;
+use futures::future::{AbortHandle, Abortable};
 use futures_intrusive::sync::LocalManualResetEvent;
 use futures_util::{
   sink::SinkExt,
   stream::{SplitSink, SplitStream, StreamExt},
 };
 use maxwell_protocol::{self, ProtocolMsg, SendError, *};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
-use super::connection::Options as ConnectionOptions;
 use super::Connection;
 use super::MAX_MSG_REF;
+use super::{connection::Options as ConnectionOptions, TimeoutExt};
 use crate::prelude::ArbiterPool;
 
 static ID_SEED: AtomicU32 = AtomicU32::new(0);
@@ -468,6 +469,38 @@ impl Handler<UnsubscribeConnectionStatusMsg> for ConnectionFull {
     &mut self, msg: UnsubscribeConnectionStatusMsg, _ctx: &mut Context<Self>,
   ) -> Self::Result {
     self.inner.unsubscribe(msg.0);
+  }
+}
+
+impl TimeoutExt for Request<ConnectionFull, ProtocolMsg> {
+  type Result = Pin<Box<dyn Future<Output = Result<ProtocolMsg, SendError>> + Send>>;
+
+  fn timeout_ext(self, dur: Duration) -> Self::Result {
+    Box::pin(async move {
+      let (abort_handle, abort_registration) = AbortHandle::new_pair();
+      let res = timeout(dur, Abortable::new(self, abort_registration)).await;
+      match res {
+        Ok(res) => match res {
+          Ok(res) => match res {
+            Ok(res) => match res {
+              Ok(res) => Ok(res),
+              Err(err) => Err(err),
+            },
+            Err(err) => match err {
+              MailboxError::Timeout => Err(SendError::Timeout),
+              MailboxError::Closed => Err(SendError::Closed),
+            },
+          },
+          // Aborted
+          Err(_err) => Err(SendError::Timeout),
+        },
+        // Elapsed(())
+        Err(_err) => {
+          abort_handle.abort();
+          Err(SendError::Timeout)
+        }
+      }
+    })
   }
 }
 
