@@ -2,7 +2,7 @@
 authors = ["Chaoqian Xu <chaoranxu@gmail.com>"]
 edition = "2021"
 name = "maxwell-utils"
-version = "0.8.4"
+version = "0.8.5"
 
 [dependencies]
 log = "0.4.17"

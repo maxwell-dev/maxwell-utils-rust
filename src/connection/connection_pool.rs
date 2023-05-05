@@ -12,7 +12,7 @@ use super::Connection;
 
 #[derive(Debug, Clone)]
 pub struct Options {
-  initial_slot_size: u8,
+  pub initial_slot_size: u8,
   //   min_slot_size: u8,
   //   max_slot_size: u8,
 }
