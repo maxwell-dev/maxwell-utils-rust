@@ -1,9 +1,9 @@
+pub mod callback_style_connection;
 pub mod connection;
-pub mod connection_full;
-pub mod connection_lite;
 pub mod connection_pool;
+pub mod future_style_connection;
 
-pub use connection::{Options as ConnectionOptions, *};
-pub use connection_full::*;
-pub use connection_lite::*;
+pub use callback_style_connection::*;
+pub use connection::{Options as ConnectionOptions, OptionsBuilder as ConnectionOptionsBuilder, *};
 pub use connection_pool::{Options as PoolOptions, *};
+pub use future_style_connection::*;
