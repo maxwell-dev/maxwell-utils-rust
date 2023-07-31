@@ -113,6 +113,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
     } else {
       self.try_set_msg_ref(msg_ref);
     }
+    log::info!("Sending msg: ref: {}, msg: {:?}", msg_ref, &msg);
 
     self.clear_idle_hops();
 
