@@ -177,6 +177,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
             Frame::Pong(_) => {}
             Frame::Binary(bytes) => {
               let msg = maxwell_protocol::decode(&bytes).unwrap();
+              log::info!("received msg: msg: {:?}", &msg);
               self.event_handler.on_msg(msg);
             }
             Frame::Close(reason) => {
