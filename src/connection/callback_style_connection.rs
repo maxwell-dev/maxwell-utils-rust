@@ -364,6 +364,16 @@ impl<EH: EventHandler> Handler<StopMsg> for CallbackStyleConnection<EH> {
   }
 }
 
+impl<EH: EventHandler> Handler<DumpInfoMsg> for CallbackStyleConnection<EH> {
+  type Result = ();
+
+  #[inline]
+  fn handle(&mut self, _msg: DumpInfoMsg, _ctx: &mut Context<Self>) -> Self::Result {
+    log::info!("Received DumpInfoMsg: actor: {}<{}>", &self.inner.url, &self.inner.id);
+    log::info!("Connection info: id: {:?}, url: {:?}", self.inner.id, self.inner.url);
+  }
+}
+
 impl<EH: EventHandler> CallbackStyleConnection<EH> {
   #[inline]
   pub fn new(endpoint: String, options: ConnectionOptions, event_handler: EH) -> Self {
@@ -398,6 +408,10 @@ impl<EH: EventHandler> CallbackStyleConnection<EH> {
         MailboxError::Timeout => Err(HandleError::Timeout),
       },
     }
+  }
+
+  pub fn dump_info(addr: Addr<Self>) {
+    addr.do_send(DumpInfoMsg);
   }
 
   #[inline]

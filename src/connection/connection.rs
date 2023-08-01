@@ -21,7 +21,7 @@ impl Default for Options {
     Options {
       reconnect_delay: 1000,
       hop_interval: 1000,
-      max_idle_hops: 600,
+      max_idle_hops: 60,
       mailbox_capacity: 10240,
       max_frame_size: 134217728,
     }
@@ -74,6 +74,10 @@ pub(crate) struct HopMsg;
 #[derive(Debug, ActixMessage)]
 #[rtype(result = "()")]
 pub struct StopMsg;
+
+#[derive(Debug, ActixMessage)]
+#[rtype(result = "()")]
+pub struct DumpInfoMsg;
 
 pub trait TimeoutExt {
   type Result;
