@@ -113,7 +113,6 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
     } else {
       self.try_set_msg_ref(msg_ref);
     }
-    log::info!("Sending msg: ref: {}, msg: {:?}", msg_ref, &msg);
 
     self.clear_idle_hops();
 
@@ -177,7 +176,6 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
             Frame::Pong(_) => {}
             Frame::Binary(bytes) => {
               let msg = maxwell_protocol::decode(&bytes).unwrap();
-              log::info!("received msg: msg: {:?}", &msg);
               self.event_handler.on_msg(msg);
             }
             Frame::Close(reason) => {
@@ -369,7 +367,6 @@ impl<EH: EventHandler> Handler<DumpInfoMsg> for CallbackStyleConnection<EH> {
 
   #[inline]
   fn handle(&mut self, _msg: DumpInfoMsg, _ctx: &mut Context<Self>) -> Self::Result {
-    log::info!("Received DumpInfoMsg: actor: {}<{}>", &self.inner.url, &self.inner.id);
     log::info!("Connection info: id: {:?}, url: {:?}", self.inner.id, self.inner.url);
   }
 }
