@@ -16,7 +16,6 @@ use actix_codec::Framed;
 use actix_web_actors::ws::{Frame, Message as WSMessage};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use awc::{ws::Codec, BoxedSocket, Client};
-use bytes::Bytes;
 use futures_intrusive::sync::LocalManualResetEvent;
 use futures_util::{
   sink::SinkExt,
@@ -94,7 +93,6 @@ struct FutureStyleConnectionInner {
   is_connected: Cell<bool>,
   attachments: RefCell<HashMap<u32, Attachment>>,
   msg_ref: Cell<u32>,
-  idle_hops: Cell<u32>,
   observable_event_handlers: RefCell<HashMap<u64, Arc<dyn ObservableEventHandler>>>,
   observable_event_actors: RefCell<HashSet<Recipient<ObservableEvent>>>,
   is_stopping: Cell<bool>,
@@ -121,7 +119,6 @@ impl FutureStyleConnectionInner {
       is_connected: Cell::new(false),
       attachments: RefCell::new(HashMap::new()),
       msg_ref: Cell::new(1),
-      idle_hops: Cell::new(0),
       observable_event_handlers: RefCell::new(HashMap::default()),
       observable_event_actors: RefCell::new(HashSet::new()),
       is_stopping: Cell::new(false),
@@ -172,8 +169,6 @@ impl FutureStyleConnectionInner {
       self.try_set_msg_ref(msg_ref);
     }
 
-    self.clear_idle_hops();
-
     let completer = Completer::new(msg_ref, Rc::clone(&self));
 
     if !self.is_connected() {
@@ -187,36 +182,28 @@ impl FutureStyleConnectionInner {
         }
       }
       if !self.is_connected() {
-        log::error!("Timeout to send msg");
-        return Err(HandleError::Any { code: 1, desc: format!("Timeout to send msg"), msg });
+        let desc = format!("Timeout to send msg: actor: {}<{}>", &self.curr_url(), &self.id);
+        log::error!("{:?}", desc);
+        return Err(HandleError::Any { code: 1, desc, msg });
       }
     }
 
     if let Err(err) =
       self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Binary(encode(&msg))).await
     {
-      log::error!("Failed to send msg: actor: {}<{}>, err: {}", &self.curr_url(), &self.id, &err);
-      return Err(HandleError::Any { code: 1, desc: format!("{:?}", err), msg });
+      let curr_url = self.curr_url();
+      let desc = format!("Failed to send msg: actor: {}<{}>, err: {}", &curr_url, &self.id, &err);
+      log::error!("{:?}", desc);
+      log::warn!(
+        "The connection maybe broken, try to reconnect: actor: {}<{}>",
+        &curr_url,
+        &self.id
+      );
+      self.toggle_to_disconnected();
+      return Err(HandleError::Any { code: 1, desc, msg });
     }
 
     Ok(completer.await)
-  }
-
-  #[inline]
-  pub async fn send_ping(self: Rc<Self>) {
-    if self.is_stopping() || !self.is_connected() {
-      return;
-    }
-
-    if !self.is_connected() {
-      self.connected_event.wait().await;
-    }
-
-    if let Err(err) =
-      self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("!"))).await
-    {
-      log::error!("Failed to send ping: err: {}", &err);
-    }
   }
 
   pub async fn receive_repeatedly(self: Rc<Self>) {
@@ -391,18 +378,6 @@ impl FutureStyleConnectionInner {
   }
 
   #[inline]
-  fn clear_idle_hops(&self) {
-    self.idle_hops.set(0);
-  }
-
-  #[inline]
-  fn increment_idle_hops(&self) -> u32 {
-    let idle_hopes = self.idle_hops.get() + 1;
-    self.idle_hops.set(idle_hopes);
-    idle_hopes
-  }
-
-  #[inline]
   fn next_url(&self) -> String {
     let curr_endpoint_index = self.endpoint_index.get();
     let next_endpoint_index =
@@ -469,8 +444,6 @@ impl Actor for FutureStyleConnection {
 
     Box::pin(Rc::clone(&self.inner).connect_repeatedly().into_actor(self)).spawn(ctx);
     Box::pin(Rc::clone(&self.inner).receive_repeatedly().into_actor(self)).spawn(ctx);
-
-    self.hop_repeatedly(ctx);
 
     log::info!("Started: actor: {}<{}>", &self.inner.curr_url(), &self.inner.id);
   }
@@ -589,15 +562,6 @@ impl Handler<ProtocolMsg> for FutureStyleConnection {
   }
 }
 
-impl Handler<HopMsg> for FutureStyleConnection {
-  type Result = ResponseFuture<()>;
-
-  #[inline]
-  fn handle(&mut self, _msg: HopMsg, _ctx: &mut Context<Self>) -> Self::Result {
-    Box::pin(Rc::clone(&self.inner).send_ping())
-  }
-}
-
 impl Handler<StopMsg> for FutureStyleConnection {
   type Result = ();
 
@@ -665,29 +629,6 @@ impl FutureStyleConnection {
         MailboxError::Timeout => Err(HandleError::Timeout),
       },
     }
-  }
-
-  #[inline]
-  fn hop_repeatedly(&self, ctx: &mut Context<Self>) {
-    let inner = self.inner.clone();
-    ctx.run_interval(Duration::from_millis(inner.options.hop_interval as u64), move |_act, ctx| {
-      Self::hop(inner.clone(), ctx)
-    });
-  }
-
-  #[inline]
-  fn hop(inner: Rc<FutureStyleConnectionInner>, ctx: &mut Context<Self>) {
-    let idle_hopes = inner.increment_idle_hops();
-    if idle_hopes >= inner.options.max_idle_hops {
-      log::info!(
-        "Current idle hops: {}, has reached max idle hops: {}",
-        idle_hopes,
-        inner.options.max_idle_hops
-      );
-      ctx.stop();
-      return;
-    }
-    ctx.notify(HopMsg);
   }
 }
 

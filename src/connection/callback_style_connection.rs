@@ -10,7 +10,6 @@ use actix::{prelude::*, Addr};
 use actix_codec::Framed;
 use actix_web_actors::ws::{Frame, Message as WSMessage};
 use awc::{ws::Codec, BoxedSocket, Client};
-use bytes::Bytes;
 use futures_intrusive::sync::LocalManualResetEvent;
 use futures_util::{
   sink::SinkExt,
@@ -46,7 +45,6 @@ struct CallbackStyleConnectionInner<EH: EventHandler> {
   disconnected_event: LocalManualResetEvent,
   is_connected: Cell<bool>,
   msg_ref: Cell<u32>,
-  idle_hops: Cell<u32>,
   event_handler: EH,
   is_stopping: Cell<bool>,
 }
@@ -65,7 +63,6 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
       disconnected_event: LocalManualResetEvent::new(true),
       is_connected: Cell::new(false),
       msg_ref: Cell::new(1),
-      idle_hops: Cell::new(0),
       event_handler,
       is_stopping: Cell::new(false),
     }
@@ -114,8 +111,6 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
       self.try_set_msg_ref(msg_ref);
     }
 
-    self.clear_idle_hops();
-
     if !self.is_connected() {
       for i in 0..3 {
         if let Err(_) =
@@ -127,36 +122,27 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
         }
       }
       if !self.is_connected() {
-        log::error!("Timeout to send msg");
-        return Err(HandleError::Any { code: 1, desc: format!("Timeout to send msg"), msg });
+        let desc = format!("Timeout to send msg: actor: {}<{}>", &self.url, &self.id);
+        log::error!("{:?}", desc);
+        return Err(HandleError::Any { code: 1, desc, msg });
       }
     }
 
     if let Err(err) =
       self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Binary(encode(&msg))).await
     {
-      log::error!("Failed to send msg: err: {}", &err);
-      return Err(HandleError::Any { code: 1, desc: format!("{:?}", err), msg });
+      let desc = format!("Failed to send msg: actor: {}<{}>, err: {}", &self.url, &self.id, &err);
+      log::error!("{:?}", desc);
+      log::warn!(
+        "The connection maybe broken, try to reconnect: actor: {}<{}>",
+        &self.url,
+        &self.id
+      );
+      self.toggle_to_disconnected();
+      return Err(HandleError::Any { code: 2, desc, msg });
     }
 
     Ok(ProtocolMsg::None)
-  }
-
-  #[inline]
-  pub async fn send_ping(self: Rc<Self>) {
-    if self.is_stopping() || !self.is_connected() {
-      return;
-    }
-
-    if !self.is_connected() {
-      self.connected_event.wait().await;
-    }
-
-    if let Err(err) =
-      self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Ping(Bytes::from("!"))).await
-    {
-      log::error!("Failed to send ping: err: {}", &err);
-    }
   }
 
   pub async fn receive_repeatedly(self: Rc<Self>) {
@@ -248,18 +234,6 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
   }
 
   #[inline]
-  fn clear_idle_hops(&self) {
-    self.idle_hops.set(0);
-  }
-
-  #[inline]
-  fn increment_idle_hops(&self) -> u32 {
-    let idle_hopes = self.idle_hops.get() + 1;
-    self.idle_hops.set(idle_hopes);
-    idle_hopes
-  }
-
-  #[inline]
   fn build_url(endpoint: &str) -> String {
     format!("ws://{}/ws", endpoint)
   }
@@ -317,8 +291,6 @@ impl<EH: EventHandler> Actor for CallbackStyleConnection<EH> {
 
     Box::pin(Rc::clone(&self.inner).connect_repeatedly().into_actor(self)).spawn(ctx);
     Box::pin(Rc::clone(&self.inner).receive_repeatedly().into_actor(self)).spawn(ctx);
-
-    self.hop_repeatedly(ctx);
   }
 
   #[inline]
@@ -340,15 +312,6 @@ impl<EH: EventHandler> Handler<ProtocolMsg> for CallbackStyleConnection<EH> {
   #[inline]
   fn handle(&mut self, msg: ProtocolMsg, _ctx: &mut Context<Self>) -> Self::Result {
     Box::pin(Rc::clone(&self.inner).send(msg))
-  }
-}
-
-impl<EH: EventHandler> Handler<HopMsg> for CallbackStyleConnection<EH> {
-  type Result = ResponseFuture<()>;
-
-  #[inline]
-  fn handle(&mut self, _msg: HopMsg, _ctx: &mut Context<Self>) -> Self::Result {
-    Box::pin(Rc::clone(&self.inner).send_ping())
   }
 }
 
@@ -409,29 +372,6 @@ impl<EH: EventHandler> CallbackStyleConnection<EH> {
 
   pub fn dump_info(addr: Addr<Self>) {
     addr.do_send(DumpInfoMsg);
-  }
-
-  #[inline]
-  fn hop_repeatedly(&self, ctx: &mut Context<Self>) {
-    let inner = self.inner.clone();
-    ctx.run_interval(Duration::from_millis(inner.options.hop_interval as u64), move |_act, ctx| {
-      Self::hop(inner.clone(), ctx)
-    });
-  }
-
-  #[inline]
-  fn hop(inner: Rc<CallbackStyleConnectionInner<EH>>, ctx: &mut Context<Self>) {
-    let idle_hopes = inner.increment_idle_hops();
-    if idle_hopes >= inner.options.max_idle_hops {
-      log::info!(
-        "Current idle hops: {}, has reached max idle hops: {}",
-        idle_hopes,
-        inner.options.max_idle_hops
-      );
-      ctx.stop();
-      return;
-    }
-    ctx.notify(HopMsg);
   }
 }
 

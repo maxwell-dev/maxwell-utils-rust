@@ -8,47 +8,29 @@ use tokio::time::timeout;
 pub trait Connection: Actor {}
 
 #[derive(Debug, Clone)]
-pub struct Options {
+pub struct ConnectionOptions {
   pub reconnect_delay: u32,
-  pub hop_interval: u32,
-  pub max_idle_hops: u32,
   pub mailbox_capacity: u32,
   pub max_frame_size: u32,
 }
 
-impl Default for Options {
+impl Default for ConnectionOptions {
   fn default() -> Self {
-    Options {
-      reconnect_delay: 1000,
-      hop_interval: 1000,
-      max_idle_hops: 60,
-      mailbox_capacity: 10240,
-      max_frame_size: 134217728,
-    }
+    ConnectionOptions { reconnect_delay: 1000, mailbox_capacity: 10240, max_frame_size: 134217728 }
   }
 }
 
-pub struct OptionsBuilder {
-  options: Options,
+pub struct ConnectionOptionsBuilder {
+  options: ConnectionOptions,
 }
 
-impl OptionsBuilder {
+impl ConnectionOptionsBuilder {
   pub fn new() -> Self {
-    OptionsBuilder { options: Options::default() }
+    ConnectionOptionsBuilder { options: ConnectionOptions::default() }
   }
 
   pub fn reconnect_delay(mut self, reconnect_delay: u32) -> Self {
     self.options.reconnect_delay = reconnect_delay;
-    self
-  }
-
-  pub fn hop_interval(mut self, hop_interval: u32) -> Self {
-    self.options.hop_interval = hop_interval;
-    self
-  }
-
-  pub fn max_idle_hops(mut self, max_idle_hops: u32) -> Self {
-    self.options.max_idle_hops = max_idle_hops;
     self
   }
 
@@ -62,14 +44,10 @@ impl OptionsBuilder {
     self
   }
 
-  pub fn build(&self) -> Options {
+  pub fn build(&self) -> ConnectionOptions {
     self.options.clone()
   }
 }
-
-#[derive(Debug, ActixMessage)]
-#[rtype(result = "()")]
-pub(crate) struct HopMsg;
 
 #[derive(Debug, ActixMessage)]
 #[rtype(result = "()")]
