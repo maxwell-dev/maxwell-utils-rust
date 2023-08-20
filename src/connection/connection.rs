@@ -21,7 +21,8 @@ impl Default for Options {
     Options {
       reconnect_delay: 1000,
       hop_interval: 1000,
-      max_idle_hops: 60,
+      // max_idle_hops: 60,
+      max_idle_hops: 4294967295, //u32:MAX
       mailbox_capacity: 10240,
       max_frame_size: 134217728,
     }
@@ -86,7 +87,8 @@ pub trait TimeoutExt {
 }
 
 impl<C: Connection + Handler<ProtocolMsg>> TimeoutExt for Request<C, ProtocolMsg>
-where <C as Actor>::Context: ToEnvelope<C, ProtocolMsg>
+where
+  <C as Actor>::Context: ToEnvelope<C, ProtocolMsg>,
 {
   type Result = Pin<Box<dyn Future<Output = Result<ProtocolMsg, HandleError<ProtocolMsg>>> + Send>>;
 
