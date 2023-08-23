@@ -383,12 +383,12 @@ impl FutureStyleConnectionInner {
     let next_endpoint_index =
       if curr_endpoint_index >= self.endpoints.len() - 1 { 0 } else { curr_endpoint_index + 1 };
     self.endpoint_index.set(next_endpoint_index);
-    format!("ws://{}/ws", self.endpoints[next_endpoint_index])
+    format!("ws://{}/$ws", self.endpoints[next_endpoint_index])
   }
 
   #[inline]
   fn curr_url(&self) -> String {
-    format!("ws://{}/ws", self.endpoints[self.endpoint_index.get()])
+    format!("ws://{}/$ws", self.endpoints[self.endpoint_index.get()])
   }
 
   #[inline]
