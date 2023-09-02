@@ -2,7 +2,7 @@
 authors = ["Chaoqian Xu <chaoranxu@gmail.com>"]
 edition = "2021"
 name = "maxwell-utils"
-version = "0.10.1"
+version = "0.10.2"
 
 [dependencies]
 log = "0.4.20"
@@ -25,7 +25,7 @@ dycovec = "0.1.1"
 num_cpus = "1.16.0"
 once_cell = "1.18.0"
 
-maxwell-protocol = {git = "https://github.com/maxwell-dev/maxwell-protocol-rust.git", tag = "v0.15.1"}
+maxwell-protocol = {git = "https://github.com/maxwell-dev/maxwell-protocol-rust.git", tag = "v0.15.2"}
 
 [dev-dependencies]
 log4rs = "1.2.0"
