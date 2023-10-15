@@ -3,10 +3,7 @@ use std::{
   fmt, format,
   pin::Pin,
   rc::Rc,
-  sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-  },
+  sync::atomic::{AtomicU32, Ordering},
   task::{Context as TaskContext, Poll, Waker},
   time::Duration,
 };
@@ -93,7 +90,7 @@ struct FutureStyleConnectionInner {
   is_connected: Cell<bool>,
   attachments: RefCell<HashMap<u32, Attachment>>,
   msg_ref: Cell<u32>,
-  observable_event_handlers: RefCell<HashMap<u64, Arc<dyn ObservableEventHandler>>>,
+  observable_event_handlers: RefCell<HashMap<u64, Box<dyn ObservableEventHandler>>>,
   observable_event_actors: RefCell<HashSet<Recipient<ObservableEvent>>>,
   is_stopping: Cell<bool>,
 }
@@ -273,7 +270,7 @@ impl FutureStyleConnectionInner {
     if self.is_connected() {
       msg.handler.handle(ObservableEvent::Connected(self.addr.borrow().as_ref().unwrap().clone()));
     }
-    self.observable_event_handlers.borrow_mut().insert(msg.handler.id(), msg.handler);
+    self.observable_event_handlers.borrow_mut().insert(msg.handler.id(), Box::new(msg.handler));
   }
 
   #[inline]
@@ -488,7 +485,7 @@ pub trait ObservableEventHandler: Send + Sync + 'static {
 #[derive(Debug, ActixMessage)]
 #[rtype(result = "()")]
 pub struct ObserveObservableEventWithHandlerMsg<OEH: ObservableEventHandler> {
-  pub handler: Arc<OEH>,
+  pub handler: OEH,
 }
 
 impl<OEH: ObservableEventHandler> Handler<ObserveObservableEventWithHandlerMsg<OEH>>

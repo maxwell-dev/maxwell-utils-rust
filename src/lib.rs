@@ -10,6 +10,8 @@ pub mod prelude {
   //! ```
   //! use maxwell_utils::prelude::*;
   //! ```
+  pub use triomphe::Arc;
+
   pub use crate::arbiter_pool::*;
   pub use crate::connection::*;
 }

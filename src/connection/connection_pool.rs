@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use actix::prelude::*;
 use ahash::RandomState as AHasher;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
+use triomphe::Arc;
 
 use super::Connection;
 
@@ -38,6 +37,20 @@ impl<C: Connection> ConnectionSlot<C> {
   pub fn get_or_init<F>(&mut self, init_connection: &F) -> Arc<Addr<C>>
   where F: Fn(&String) -> Addr<C> {
     let index = self.next_index();
+    self.get_or_init_with_index(index, init_connection)
+  }
+
+  #[inline]
+  pub fn get_or_init_with_index_seed<F>(
+    &mut self, index_seed: u32, init_connection: &F,
+  ) -> Arc<Addr<C>>
+  where F: Fn(&String) -> Addr<C> {
+    self.get_or_init_with_index(self.build_index(index_seed), init_connection)
+  }
+
+  #[inline]
+  fn get_or_init_with_index<F>(&mut self, index: usize, init_connection: &F) -> Arc<Addr<C>>
+  where F: Fn(&String) -> Addr<C> {
     let connection = &self.connections[index];
     if connection.connected() {
       Arc::clone(connection)
@@ -48,21 +61,18 @@ impl<C: Connection> ConnectionSlot<C> {
   }
 
   #[inline]
-  pub fn remove(&mut self, connection: &Arc<Addr<C>>) {
-    let index = self.connections.iter().position(|c| c == connection);
-    if let Some(index) = index {
-      self.connections.swap_remove(index);
-    }
-  }
-
-  #[inline]
-  pub fn next_index(&mut self) -> usize {
+  fn next_index(&mut self) -> usize {
     if self.index_seed as u32 + 1 > u16::MAX as u32 {
       self.index_seed = 0;
     } else {
       self.index_seed += 1;
     }
     (self.index_seed % self.connections.len() as u16) as usize
+  }
+
+  #[inline]
+  fn build_index(&self, seed: u32) -> usize {
+    (seed % self.connections.len() as u32) as usize
   }
 }
 
@@ -82,20 +92,37 @@ impl<C: Connection> ConnectionPool<C> {
   where
     S: AsRef<str>,
     F: Fn(&String) -> Addr<C>, {
-    self
-      .slots
-      .entry(endpoint.as_ref().to_owned())
-      .or_insert_with(|| {
-        ConnectionSlot::new(endpoint.as_ref().to_owned(), &self.options, init_connection)
-      })
-      .value_mut()
-      .get_or_init(init_connection)
+    match self.slots.entry(endpoint.as_ref().to_owned()) {
+      Entry::Occupied(mut entry) => entry.get_mut().get_or_init(init_connection),
+      Entry::Vacant(entry) => {
+        let mut slot =
+          ConnectionSlot::new(endpoint.as_ref().to_owned(), &self.options, init_connection);
+        let connection = slot.get_or_init(init_connection);
+        entry.insert(slot);
+        connection
+      }
+    }
   }
 
   #[inline]
-  pub fn remove<S>(&self, endpoint: S, connection: &Arc<Addr<C>>)
-  where S: AsRef<str> {
-    self.slots.get_mut(endpoint.as_ref()).map(|mut slot| slot.remove(connection));
+  pub fn get_or_init_with_index_seed<S, F>(
+    &self, endpoint: S, index_seed: u32, init_connection: &F,
+  ) -> Arc<Addr<C>>
+  where
+    S: AsRef<str>,
+    F: Fn(&String) -> Addr<C>, {
+    match self.slots.entry(endpoint.as_ref().to_owned()) {
+      Entry::Occupied(mut entry) => {
+        entry.get_mut().get_or_init_with_index_seed(index_seed, init_connection)
+      }
+      Entry::Vacant(entry) => {
+        let mut slot =
+          ConnectionSlot::new(endpoint.as_ref().to_owned(), &self.options, init_connection);
+        let connection = slot.get_or_init_with_index_seed(index_seed, init_connection);
+        entry.insert(slot);
+        connection
+      }
+    }
   }
 
   #[inline]
@@ -111,13 +138,11 @@ impl<C: Connection> ConnectionPool<C> {
 #[cfg(test)]
 mod tests {
 
-  use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-  };
+  use std::time::{Duration, Instant};
 
   use actix::prelude::*;
   use tokio::time::sleep;
+  use triomphe::Arc;
 
   use super::*;
   use crate::connection::*;
@@ -138,15 +163,5 @@ mod tests {
     sleep(Duration::from_secs(3)).await;
     let spent = Instant::now() - start;
     println!("Spent {:?}ms to create connetion pool", spent.as_millis());
-
-    let connection = connection_pool.get_or_init(endpoint, &|endpoint| {
-      FutureStyleConnection::start2(endpoint.to_owned(), ConnectionOptions::default())
-    });
-    connection_pool.remove(endpoint, &connection);
-
-    let connection = connection_pool.get_or_init(endpoint, &|endpoint| {
-      FutureStyleConnection::start2(endpoint.to_owned(), ConnectionOptions::default())
-    });
-    connection_pool.remove(endpoint, &connection);
   }
 }
