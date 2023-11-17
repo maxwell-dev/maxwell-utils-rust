@@ -1,9 +1,9 @@
-use actix::prelude::*;
+use actix::{dev::ToEnvelope, prelude::*};
 use ahash::RandomState as AHasher;
 use dashmap::{mapref::entry::Entry, DashMap};
 use triomphe::Arc;
 
-use super::Connection;
+use super::{Connection, StopMsg};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionPoolOptions {
@@ -31,6 +31,15 @@ impl<C: Connection> ConnectionSlot<C> {
       connections.push(Arc::new(init_connection(&endpoint)));
     }
     ConnectionSlot { endpoint, connections, index_seed: 0 }
+  }
+
+  #[inline]
+  pub fn clear(&mut self)
+  where <C as actix::Actor>::Context: ToEnvelope<C, StopMsg> {
+    for connection in &self.connections {
+      connection.do_send(StopMsg)
+    }
+    self.connections.clear();
   }
 
   #[inline]
@@ -127,8 +136,16 @@ impl<C: Connection> ConnectionPool<C> {
 
   #[inline]
   pub fn remove_by_endpoint<S>(&self, endpoint: S)
-  where S: AsRef<str> {
-    self.slots.remove(endpoint.as_ref());
+  where
+    S: AsRef<str>,
+    <C as actix::Actor>::Context: ToEnvelope<C, StopMsg>, {
+    match self.slots.entry(endpoint.as_ref().to_owned()) {
+      Entry::Occupied(mut occupied) => {
+        occupied.get_mut().clear();
+        occupied.remove();
+      }
+      Entry::Vacant(_) => {}
+    }
   }
 }
 

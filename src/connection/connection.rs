@@ -5,7 +5,7 @@ use futures::future::{AbortHandle, Abortable};
 use maxwell_protocol::{self, HandleError, ProtocolMsg};
 use tokio::time::timeout;
 
-pub trait Connection: Actor {}
+pub trait Connection: Actor + Handler<StopMsg> {}
 
 #[derive(Debug, Clone)]
 pub struct ConnectionOptions {
