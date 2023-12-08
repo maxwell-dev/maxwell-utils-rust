@@ -326,7 +326,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
 
   #[inline]
   fn build_url(endpoint: &str) -> String {
-    format!("http://{}/$ws", endpoint)
+    format!("ws://{}/$ws", endpoint)
   }
 }
 

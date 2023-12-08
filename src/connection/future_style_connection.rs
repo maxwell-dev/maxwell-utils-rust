@@ -416,7 +416,7 @@ impl FutureStyleConnectionInner {
 
   #[inline]
   fn build_url(endpoint: &str) -> String {
-    format!("http://{}/$ws", endpoint)
+    format!("ws://{}/$ws", endpoint)
   }
 
   async fn connect(&self, endpoint: &String) -> Result<(Sink, Stream), AnyError> {
