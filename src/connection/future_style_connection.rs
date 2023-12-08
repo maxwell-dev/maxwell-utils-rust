@@ -13,7 +13,8 @@ use actix::{prelude::*, Message as ActixMessage};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use anyhow::Error as AnyError;
 use fastwebsockets::{
-  handshake, FragmentCollectorRead, Frame, OpCode, WebSocketError, WebSocketWrite,
+  handshake, CloseCode, FragmentCollectorRead, Frame, OpCode, Payload, WebSocketError,
+  WebSocketWrite,
 };
 use futures_intrusive::sync::LocalManualResetEvent;
 use hyper::{
@@ -267,7 +268,7 @@ impl FutureStyleConnectionInner {
               "Disconnected: actor: {}<{}>, reason: {:?}",
               &self.curr_endpoint(),
               &self.id,
-              &frame.payload
+              Self::decode_error_payload(&frame.payload).map_err(|err| format!("{:?}", err))
             );
             self.toggle_to_disconnected();
           }
@@ -414,6 +415,22 @@ impl FutureStyleConnectionInner {
     &self.endpoints[self.endpoint_index.get()]
   }
 
+  #[inline]
+  fn decode_error_payload(payload: &Payload) -> Result<CloseCode, WebSocketError> {
+    match payload.len() {
+      0 => Ok(CloseCode::Normal),
+      1 => return Err(WebSocketError::InvalidCloseFrame),
+      _ => {
+        let code = CloseCode::from(u16::from_be_bytes(payload[0..2].try_into().unwrap()));
+        if !code.is_allowed() {
+          return Err(WebSocketError::InvalidCloseCode);
+        }
+        Ok(code)
+      }
+    }
+  }
+
+  #[inline]
   async fn connect(&self, endpoint: &String) -> Result<(Sink, Stream), AnyError> {
     let stream = TcpStream::connect(endpoint).await?;
     let req = HyperRequest::builder()
