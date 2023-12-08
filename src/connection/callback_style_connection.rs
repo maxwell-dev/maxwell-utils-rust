@@ -203,7 +203,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
               "Disconnected: actor: {}<{}>, reason: {:?}",
               &self.endpoint,
               &self.id,
-              Self::decode_error_payload(&frame.payload).map_err(|err| format!("{:?}", err))
+              Self::stringify(&frame.payload)
             );
             self.toggle_to_disconnected();
           }
@@ -260,6 +260,14 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
   fn try_set_msg_ref(&self, msg_ref: u32) {
     if msg_ref > self.msg_ref.get() {
       self.msg_ref.set(msg_ref);
+    }
+  }
+
+  #[inline]
+  fn stringify(payload: &Payload) -> String {
+    match Self::decode_error_payload(payload) {
+      Ok(code) => format!("{:?}", code),
+      Err(err) => format!("{:?}", err),
     }
   }
 

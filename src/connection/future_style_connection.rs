@@ -268,7 +268,7 @@ impl FutureStyleConnectionInner {
               "Disconnected: actor: {}<{}>, reason: {:?}",
               &self.curr_endpoint(),
               &self.id,
-              Self::decode_error_payload(&frame.payload).map_err(|err| format!("{:?}", err))
+              Self::stringify(&frame.payload)
             );
             self.toggle_to_disconnected();
           }
@@ -413,6 +413,14 @@ impl FutureStyleConnectionInner {
   #[inline]
   fn curr_endpoint(&self) -> &String {
     &self.endpoints[self.endpoint_index.get()]
+  }
+
+  #[inline]
+  fn stringify(payload: &Payload) -> String {
+    match Self::decode_error_payload(payload) {
+      Ok(code) => format!("{:?}", code),
+      Err(err) => format!("{:?}", err),
+    }
   }
 
   #[inline]
