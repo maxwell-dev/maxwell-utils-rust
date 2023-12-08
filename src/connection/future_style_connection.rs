@@ -1,6 +1,7 @@
 use std::{
   cell::{Cell, RefCell},
   fmt, format,
+  future::Future,
   pin::Pin,
   rc::Rc,
   sync::atomic::{AtomicU32, Ordering},
@@ -9,18 +10,24 @@ use std::{
 };
 
 use actix::{prelude::*, Message as ActixMessage};
-use actix_codec::Framed;
-use actix_web_actors::ws::{Frame, Message as WSMessage};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
-use awc::{ws::Codec, BoxedSocket, Client};
+use anyhow::Error as AnyError;
+use fastwebsockets::{
+  handshake, FragmentCollectorRead, Frame, OpCode, WebSocketError, WebSocketWrite,
+};
 use futures_intrusive::sync::LocalManualResetEvent;
-use futures_util::{
-  sink::SinkExt,
-  stream::{SplitSink, SplitStream, StreamExt},
-  Future,
+use hyper::{
+  header::{CONNECTION, UPGRADE},
+  upgrade::Upgraded,
+  Body, Request as HyperRequest,
 };
 use maxwell_protocol::{self, HandleError, ProtocolMsg, *};
-use tokio::time::{sleep, timeout};
+use tokio::{
+  io::{split as tokio_split, ReadHalf, WriteHalf},
+  net::TcpStream,
+  task::spawn as tokio_spawn,
+  time::{sleep, timeout},
+};
 
 use super::*;
 use crate::arbiter_pool::ArbiterPool;
@@ -77,14 +84,29 @@ impl Future for Completer {
   }
 }
 
+// Tie hyper's executor to tokio runtime
+struct SpawnExecutor;
+impl<Fut> hyper::rt::Executor<Fut> for SpawnExecutor
+where
+  Fut: Future + Send + 'static,
+  Fut::Output: Send + 'static,
+{
+  fn execute(&self, fut: Fut) {
+    tokio_spawn(fut);
+  }
+}
+
+type Sink = WebSocketWrite<WriteHalf<Upgraded>>;
+type Stream = FragmentCollectorRead<ReadHalf<Upgraded>>;
+
 struct FutureStyleConnectionInner {
   id: u32,
   addr: RefCell<Option<Addr<FutureStyleConnection>>>,
   endpoint_index: Cell<usize>,
   endpoints: Vec<String>,
   options: ConnectionOptions,
-  sink: RefCell<Option<SplitSink<Framed<BoxedSocket, Codec>, WSMessage>>>,
-  stream: RefCell<Option<SplitStream<Framed<BoxedSocket, Codec>>>>,
+  sink: RefCell<Option<Sink>>,
+  stream: RefCell<Option<Stream>>,
   connected_event: LocalManualResetEvent,
   disconnected_event: LocalManualResetEvent,
   is_connected: Cell<bool>,
@@ -107,7 +129,7 @@ impl FutureStyleConnectionInner {
       id: ID_SEED.fetch_add(1, Ordering::Relaxed),
       addr: RefCell::new(None),
       endpoint_index: Cell::new(endpoints.len() - 1),
-      endpoints: endpoints,
+      endpoints,
       options,
       sink: RefCell::new(None),
       stream: RefCell::new(None),
@@ -129,23 +151,24 @@ impl FutureStyleConnectionInner {
       }
 
       self.disconnected_event.wait().await;
-
-      let url = self.next_url();
-      log::info!("Connecting: actor: {}<{}>", &url, &self.id);
-      match Client::new()
-        .ws(&url)
-        .max_frame_size(self.options.max_frame_size as usize)
-        .connect()
-        .await
-      {
-        Ok((_resp, socket)) => {
-          log::info!("Connected: actor: {}<{}>", &url, &self.id);
-          let (sink, stream) = StreamExt::split(socket);
+      self.close_sink().await.unwrap_or_else(|err| {
+        log::error!(
+          "Failed to close sink: actor: {}<{}>, err: {}",
+          &self.curr_endpoint(),
+          &self.id,
+          err
+        );
+      });
+      let endpoint = self.next_endpoint();
+      log::info!("Connecting: actor: {}<{}>", &endpoint, &self.id);
+      match self.connect(&endpoint).await {
+        Ok((sink, stream)) => {
+          log::info!("Connected: actor: {}<{}>", endpoint, &self.id);
           self.set_socket_pair(Some(sink), Some(stream));
           self.toggle_to_connected();
         }
         Err(err) => {
-          log::error!("Failed to connect: actor: {}<{}>, err: {}", &url, &self.id, err);
+          log::error!("Failed to connect: actor: {}<{}>, err: {}", endpoint, &self.id, err);
           self.set_socket_pair(None, None);
           self.toggle_to_disconnected();
           sleep(Duration::from_millis(self.options.reconnect_delay as u64)).await;
@@ -179,21 +202,27 @@ impl FutureStyleConnectionInner {
         }
       }
       if !self.is_connected() {
-        let desc = format!("Timeout to send msg: actor: {}<{}>", &self.curr_url(), &self.id);
+        let desc = format!("Timeout to send msg: actor: {}<{}>", &self.curr_endpoint(), &self.id);
         log::error!("{:?}", desc);
         return Err(HandleError::Any { code: 1, desc, msg });
       }
     }
 
-    if let Err(err) =
-      self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Binary(encode(&msg))).await
+    if let Err(err) = self
+      .sink
+      .borrow_mut()
+      .as_mut()
+      .unwrap()
+      .write_frame(Frame::binary(encode(&msg).as_ref().into()))
+      .await
     {
-      let curr_url = self.curr_url();
-      let desc = format!("Failed to send msg: actor: {}<{}>, err: {}", &curr_url, &self.id, &err);
+      let curr_endpoint = self.curr_endpoint();
+      let desc =
+        format!("Failed to send msg: actor: {}<{}>, err: {}", &curr_endpoint, &self.id, &err);
       log::error!("{:?}", desc);
       log::warn!(
         "The connection maybe broken, try to reconnect: actor: {}<{}>",
-        &curr_url,
+        &curr_endpoint,
         &self.id
       );
       self.toggle_to_disconnected();
@@ -213,46 +242,43 @@ impl FutureStyleConnectionInner {
         self.connected_event.wait().await;
       }
 
-      if let Some(res) = self.stream.borrow_mut().as_mut().unwrap().next().await {
-        match res {
-          Ok(frame) => match frame {
-            Frame::Ping(_) => {}
-            Frame::Pong(_) => {}
-            Frame::Binary(bytes) => {
-              let response = maxwell_protocol::decode(&bytes).unwrap();
-              let msg_ref = maxwell_protocol::get_ref(&response);
-              let mut attachments = self.attachments.borrow_mut();
-              if let Some(attachment) = attachments.get_mut(&msg_ref) {
-                attachment.response = Some(response);
-                attachment.waker.as_ref().unwrap().wake_by_ref();
-              }
+      match self
+        .stream
+        .borrow_mut()
+        .as_mut()
+        .unwrap() // send_fn is empty because we does not create obligated writes here.
+        .read_frame(&mut move |_| async { Ok::<_, WebSocketError>(()) })
+        .await
+      {
+        Ok(frame) => match frame.opcode {
+          OpCode::Ping => {}
+          OpCode::Pong => {}
+          OpCode::Binary => {
+            let response = decode_bytes(&frame.payload).unwrap();
+            let msg_ref = maxwell_protocol::get_ref(&response);
+            let mut attachments = self.attachments.borrow_mut();
+            if let Some(attachment) = attachments.get_mut(&msg_ref) {
+              attachment.response = Some(response);
+              attachment.waker.as_ref().unwrap().wake_by_ref();
             }
-            Frame::Close(reason) => {
-              log::error!(
-                "Disconnected: actor: {}<{}>, err: {:?}",
-                &self.curr_url(),
-                &self.id,
-                &reason
-              );
-              self.toggle_to_disconnected();
-            }
-            other => {
-              log::warn!("Received unknown msg: {:?}", &other);
-            }
-          },
-          Err(err) => {
-            log::error!("Protocol error occured: err: {}", &err);
+          }
+          OpCode::Close => {
+            log::error!(
+              "Disconnected: actor: {}<{}>, reason: {:?}",
+              &self.curr_endpoint(),
+              &self.id,
+              &frame.payload
+            );
             self.toggle_to_disconnected();
           }
+          other => {
+            log::warn!("Received unknown msg: {:?}/{:?}", &other, &frame.payload);
+          }
+        },
+        Err(err) => {
+          log::error!("Protocol error occured: err: {}", &err);
+          self.toggle_to_disconnected();
         }
-      } else {
-        log::error!(
-          "Disconnected: actor: {}<{}>, err: {}",
-          &self.curr_url(),
-          &self.id,
-          "eof of the stream"
-        );
-        self.toggle_to_disconnected();
       }
     }
   }
@@ -375,24 +401,47 @@ impl FutureStyleConnectionInner {
   }
 
   #[inline]
-  fn next_url(&self) -> String {
+  fn next_endpoint(&self) -> &String {
     let curr_endpoint_index = self.endpoint_index.get();
     let next_endpoint_index =
       if curr_endpoint_index >= self.endpoints.len() - 1 { 0 } else { curr_endpoint_index + 1 };
     self.endpoint_index.set(next_endpoint_index);
-    format!("ws://{}/$ws", self.endpoints[next_endpoint_index])
+    &self.endpoints[next_endpoint_index]
   }
 
   #[inline]
-  fn curr_url(&self) -> String {
-    format!("ws://{}/$ws", self.endpoints[self.endpoint_index.get()])
+  fn curr_endpoint(&self) -> &String {
+    &self.endpoints[self.endpoint_index.get()]
   }
 
   #[inline]
-  fn set_socket_pair(
-    &self, sink: Option<SplitSink<Framed<BoxedSocket, Codec>, WSMessage>>,
-    stream: Option<SplitStream<Framed<BoxedSocket, Codec>>>,
-  ) {
+  fn build_url(endpoint: &str) -> String {
+    format!("http://{}/$ws", endpoint)
+  }
+
+  async fn connect(&self, endpoint: &String) -> Result<(Sink, Stream), AnyError> {
+    let stream = TcpStream::connect(endpoint).await?;
+    let req = HyperRequest::builder()
+      .method("GET")
+      .uri(Self::build_url(endpoint))
+      .header("Host", endpoint)
+      .header(UPGRADE, "websocket")
+      .header(CONNECTION, "upgrade")
+      .header("CLIENT-ID", &format!("{}", self.id))
+      .header("Sec-WebSocket-Key", handshake::generate_key())
+      .header("Sec-WebSocket-Version", "13")
+      .body(Body::empty())?;
+
+    let (mut ws, _) = handshake::client(&SpawnExecutor, req, stream).await?;
+    ws.set_auto_close(false);
+    ws.set_auto_pong(false);
+    ws.set_max_message_size(self.options.max_frame_size as usize);
+    let (stream, sink) = ws.split(|s| tokio_split(s));
+    Ok((sink, FragmentCollectorRead::new(stream)))
+  }
+
+  #[inline]
+  fn set_socket_pair(&self, sink: Option<Sink>, stream: Option<Stream>) {
     *self.sink.borrow_mut() = sink;
     *self.stream.borrow_mut() = stream;
   }
@@ -411,6 +460,15 @@ impl FutureStyleConnectionInner {
     self.connected_event.reset();
     self.disconnected_event.set();
     self.notify_disconnected_event()
+  }
+
+  #[inline]
+  async fn close_sink(&self) -> Result<(), AnyError> {
+    if let Some(sink) = self.sink.try_borrow_mut()?.as_mut() {
+      Ok(sink.write_frame(Frame::close_raw(vec![].into())).await?)
+    } else {
+      Ok(())
+    }
   }
 
   #[inline]
@@ -442,19 +500,19 @@ impl Actor for FutureStyleConnection {
     Box::pin(Rc::clone(&self.inner).connect_repeatedly().into_actor(self)).spawn(ctx);
     Box::pin(Rc::clone(&self.inner).receive_repeatedly().into_actor(self)).spawn(ctx);
 
-    log::info!("Started: actor: {}<{}>", &self.inner.curr_url(), &self.inner.id);
+    log::info!("Started: actor: {}<{}>", &self.inner.curr_endpoint(), &self.inner.id);
   }
 
   #[inline]
   fn stopping(&mut self, _: &mut Self::Context) -> Running {
-    log::info!("Stopping: actor: {}<{}>", &self.inner.curr_url(), &self.inner.id);
+    log::info!("Stopping: actor: {}<{}>", &self.inner.curr_endpoint(), &self.inner.id);
     self.inner.stop();
     Running::Stop
   }
 
   #[inline]
   fn stopped(&mut self, _: &mut Self::Context) {
-    log::info!("Stopped: actor: {}<{}>", &self.inner.curr_url(), &self.inner.id);
+    log::info!("Stopped: actor: {}<{}>", &self.inner.curr_endpoint(), &self.inner.id);
   }
 }
 

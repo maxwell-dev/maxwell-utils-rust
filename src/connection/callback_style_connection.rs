@@ -1,27 +1,50 @@
 use std::{
   cell::{Cell, RefCell},
   format,
+  future::Future,
   rc::Rc,
   sync::atomic::{AtomicU32, Ordering},
   time::Duration,
 };
 
 use actix::{prelude::*, Addr};
-use actix_codec::Framed;
-use actix_web_actors::ws::{Frame, Message as WSMessage};
-use awc::{ws::Codec, BoxedSocket, Client};
+use anyhow::Error as AnyError;
+use fastwebsockets::{
+  handshake, FragmentCollectorRead, Frame, OpCode, WebSocketError, WebSocketWrite,
+};
 use futures_intrusive::sync::LocalManualResetEvent;
-use futures_util::{
-  sink::SinkExt,
-  stream::{SplitSink, SplitStream, StreamExt},
+use hyper::{
+  header::{CONNECTION, UPGRADE},
+  upgrade::Upgraded,
+  Body, Request as HyperRequest,
 };
 use maxwell_protocol::{self, HandleError, ProtocolMsg, *};
-use tokio::time::{sleep, timeout};
+use tokio::{
+  io::{split as tokio_split, ReadHalf, WriteHalf},
+  net::TcpStream,
+  task::spawn as tokio_spawn,
+  time::{sleep, timeout},
+};
 
 use super::*;
 use crate::arbiter_pool::ArbiterPool;
 
 static ID_SEED: AtomicU32 = AtomicU32::new(0);
+
+// Tie hyper's executor to tokio runtime
+struct SpawnExecutor;
+impl<Fut> hyper::rt::Executor<Fut> for SpawnExecutor
+where
+  Fut: Future + Send + 'static,
+  Fut::Output: Send + 'static,
+{
+  fn execute(&self, fut: Fut) {
+    tokio_spawn(fut);
+  }
+}
+
+type Sink = WebSocketWrite<WriteHalf<Upgraded>>;
+type Stream = FragmentCollectorRead<ReadHalf<Upgraded>>;
 
 pub trait EventHandler: Send + Sync + Unpin + Sized + 'static {
   #[inline(always)]
@@ -37,10 +60,10 @@ pub trait EventHandler: Send + Sync + Unpin + Sized + 'static {
 struct CallbackStyleConnectionInner<EH: EventHandler> {
   id: u32,
   addr: RefCell<Option<Addr<CallbackStyleConnection<EH>>>>,
-  url: String,
+  endpoint: String,
   options: ConnectionOptions,
-  sink: RefCell<Option<SplitSink<Framed<BoxedSocket, Codec>, WSMessage>>>,
-  stream: RefCell<Option<SplitStream<Framed<BoxedSocket, Codec>>>>,
+  sink: RefCell<Option<Sink>>,
+  stream: RefCell<Option<Stream>>,
   connected_event: LocalManualResetEvent,
   disconnected_event: LocalManualResetEvent,
   is_connected: Cell<bool>,
@@ -55,7 +78,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
     CallbackStyleConnectionInner {
       id: ID_SEED.fetch_add(1, Ordering::Relaxed),
       addr: RefCell::new(None),
-      url: Self::build_url(&endpoint),
+      endpoint,
       options,
       sink: RefCell::new(None),
       stream: RefCell::new(None),
@@ -76,21 +99,19 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
 
       self.disconnected_event.wait().await;
 
-      log::info!("Connecting: actor: {}<{}>", &self.url, &self.id);
-      match Client::new()
-        .ws(&self.url)
-        .max_frame_size(self.options.max_frame_size as usize)
-        .connect()
-        .await
-      {
-        Ok((_resp, socket)) => {
-          log::info!("Connected: actor: {}<{}>", &self.url, &self.id);
-          let (sink, stream) = StreamExt::split(socket);
+      self.close_sink().await.unwrap_or_else(|err| {
+        log::error!("Failed to close sink: actor: {}<{}>, err: {}", &self.endpoint, &self.id, err);
+      });
+
+      log::info!("Connecting: actor: {}<{}>", &self.endpoint, &self.id);
+      match self.connect().await {
+        Ok((sink, stream)) => {
+          log::info!("Connected: actor: {}<{}>", &self.endpoint, &self.id);
           self.set_socket_pair(Some(sink), Some(stream));
           self.toggle_to_connected();
         }
         Err(err) => {
-          log::error!("Failed to connect: actor: {}<{}>, err: {}", &self.url, &self.id, err);
+          log::error!("Failed to connect: actor: {}<{}>, err: {}", &self.endpoint, &self.id, err);
           self.set_socket_pair(None, None);
           self.toggle_to_disconnected();
           sleep(Duration::from_millis(self.options.reconnect_delay as u64)).await;
@@ -122,20 +143,26 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
         }
       }
       if !self.is_connected() {
-        let desc = format!("Timeout to send msg: actor: {}<{}>", &self.url, &self.id);
+        let desc = format!("Timeout to send msg: actor: {}<{}>", &self.endpoint, &self.id);
         log::error!("{:?}", desc);
         return Err(HandleError::Any { code: 1, desc, msg });
       }
     }
 
-    if let Err(err) =
-      self.sink.borrow_mut().as_mut().unwrap().send(WSMessage::Binary(encode(&msg))).await
+    if let Err(err) = self
+      .sink
+      .borrow_mut()
+      .as_mut()
+      .unwrap()
+      .write_frame(Frame::binary(encode(&msg).as_ref().into()))
+      .await
     {
-      let desc = format!("Failed to send msg: actor: {}<{}>, err: {}", &self.url, &self.id, &err);
+      let desc =
+        format!("Failed to send msg: actor: {}<{}>, err: {}", &self.endpoint, &self.id, &err);
       log::error!("{:?}", desc);
       log::warn!(
         "The connection maybe broken, try to reconnect: actor: {}<{}>",
-        &self.url,
+        &self.endpoint,
         &self.id
       );
       self.toggle_to_disconnected();
@@ -155,36 +182,38 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
         self.connected_event.wait().await;
       }
 
-      if let Some(res) = self.stream.borrow_mut().as_mut().unwrap().next().await {
-        match res {
-          Ok(frame) => match frame {
-            Frame::Ping(_) => {}
-            Frame::Pong(_) => {}
-            Frame::Binary(bytes) => {
-              let msg = maxwell_protocol::decode(&bytes).unwrap();
-              self.event_handler.on_msg(msg);
-            }
-            Frame::Close(reason) => {
-              log::error!("Disconnected: actor: {}<{}>, err: {:?}", &self.url, &self.id, &reason);
-              self.toggle_to_disconnected();
-            }
-            other => {
-              log::warn!("Received unknown msg: {:?}", &other);
-            }
-          },
-          Err(err) => {
-            log::error!("Protocol error occured: err: {}", &err);
+      match self
+        .stream
+        .borrow_mut()
+        .as_mut()
+        .unwrap()
+        // send_fn is empty because we does not create obligated writes here.
+        .read_frame(&mut move |_| async { Ok::<_, WebSocketError>(()) })
+        .await
+      {
+        Ok(frame) => match frame.opcode {
+          OpCode::Ping => {}
+          OpCode::Pong => {}
+          OpCode::Binary => {
+            self.event_handler.on_msg(decode_bytes(&frame.payload).unwrap());
+          }
+          OpCode::Close => {
+            log::error!(
+              "Disconnected: actor: {}<{}>, reason: {:?}",
+              &self.endpoint,
+              &self.id,
+              &frame.payload
+            );
             self.toggle_to_disconnected();
           }
+          other => {
+            log::warn!("Received unknown msg: {:?}/{:?}", &other, &frame.payload);
+          }
+        },
+        Err(err) => {
+          log::error!("Protocol error occured: err: {}", &err);
+          self.toggle_to_disconnected();
         }
-      } else {
-        log::error!(
-          "Disconnected: actor: {}<{}>, err: {}",
-          &self.url,
-          &self.id,
-          "eof of the stream"
-        );
-        self.toggle_to_disconnected();
       }
     }
   }
@@ -233,16 +262,29 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
     }
   }
 
-  #[inline]
-  fn build_url(endpoint: &str) -> String {
-    format!("ws://{}/$ws", endpoint)
+  async fn connect(&self) -> Result<(Sink, Stream), AnyError> {
+    let stream = TcpStream::connect(&self.endpoint).await?;
+    let req = HyperRequest::builder()
+      .method("GET")
+      .uri(Self::build_url(&self.endpoint))
+      .header("Host", &self.endpoint)
+      .header(UPGRADE, "websocket")
+      .header(CONNECTION, "upgrade")
+      .header("CLIENT-ID", &format!("{}", self.id))
+      .header("Sec-WebSocket-Key", handshake::generate_key())
+      .header("Sec-WebSocket-Version", "13")
+      .body(Body::empty())?;
+
+    let (mut ws, _) = handshake::client(&SpawnExecutor, req, stream).await?;
+    ws.set_auto_close(false);
+    ws.set_auto_pong(false);
+    ws.set_max_message_size(self.options.max_frame_size as usize);
+    let (stream, sink) = ws.split(|s| tokio_split(s));
+    Ok((sink, FragmentCollectorRead::new(stream)))
   }
 
   #[inline]
-  fn set_socket_pair(
-    &self, sink: Option<SplitSink<Framed<BoxedSocket, Codec>, WSMessage>>,
-    stream: Option<SplitStream<Framed<BoxedSocket, Codec>>>,
-  ) {
+  fn set_socket_pair(&self, sink: Option<Sink>, stream: Option<Stream>) {
     *self.sink.borrow_mut() = sink;
     *self.stream.borrow_mut() = stream;
   }
@@ -260,7 +302,16 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
     self.is_connected.set(false);
     self.connected_event.reset();
     self.disconnected_event.set();
-    self.notify_disconnected_event()
+    self.notify_disconnected_event();
+  }
+
+  #[inline]
+  async fn close_sink(&self) -> Result<(), AnyError> {
+    if let Some(sink) = self.sink.try_borrow_mut()?.as_mut() {
+      Ok(sink.write_frame(Frame::close_raw(vec![].into())).await?)
+    } else {
+      Ok(())
+    }
   }
 
   #[inline]
@@ -271,6 +322,11 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
   #[inline]
   fn is_stopping(&self) -> bool {
     self.is_stopping.get()
+  }
+
+  #[inline]
+  fn build_url(endpoint: &str) -> String {
+    format!("http://{}/$ws", endpoint)
   }
 }
 
@@ -284,7 +340,7 @@ impl<EH: EventHandler> Actor for CallbackStyleConnection<EH> {
 
   #[inline]
   fn started(&mut self, ctx: &mut Self::Context) {
-    log::info!("Started: actor: {}<{}>", &self.inner.url, &self.inner.id);
+    log::info!("Started: actor: {}<{}>", &self.inner.endpoint, &self.inner.id);
     *self.inner.addr.borrow_mut() = Some(ctx.address());
 
     ctx.set_mailbox_capacity(self.inner.options.mailbox_capacity as usize);
@@ -295,14 +351,14 @@ impl<EH: EventHandler> Actor for CallbackStyleConnection<EH> {
 
   #[inline]
   fn stopping(&mut self, _: &mut Self::Context) -> Running {
-    log::info!("Stopping: actor: {}<{}>", &self.inner.url, &self.inner.id);
+    log::info!("Stopping: actor: {}<{}>", &self.inner.endpoint, &self.inner.id);
     self.inner.stop();
     Running::Stop
   }
 
   #[inline]
   fn stopped(&mut self, _: &mut Self::Context) {
-    log::info!("Stopped: actor: {}<{}>", &self.inner.url, &self.inner.id);
+    log::info!("Stopped: actor: {}<{}>", &self.inner.endpoint, &self.inner.id);
   }
 }
 
@@ -320,7 +376,7 @@ impl<EH: EventHandler> Handler<StopMsg> for CallbackStyleConnection<EH> {
 
   #[inline]
   fn handle(&mut self, _msg: StopMsg, ctx: &mut Context<Self>) -> Self::Result {
-    log::info!("Received StopMsg: actor: {}<{}>", &self.inner.url, &self.inner.id);
+    log::info!("Received StopMsg: actor: {}<{}>", &self.inner.endpoint, &self.inner.id);
     ctx.stop();
   }
 }
@@ -330,7 +386,7 @@ impl<EH: EventHandler> Handler<DumpInfoMsg> for CallbackStyleConnection<EH> {
 
   #[inline]
   fn handle(&mut self, _msg: DumpInfoMsg, _ctx: &mut Context<Self>) -> Self::Result {
-    log::info!("Connection info: id: {:?}, url: {:?}", self.inner.id, self.inner.url);
+    log::info!("Connection info: id: {:?}, endpoint: {:?}", self.inner.id, self.inner.endpoint);
   }
 }
 
