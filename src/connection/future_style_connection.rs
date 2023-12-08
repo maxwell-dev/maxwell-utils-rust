@@ -414,16 +414,11 @@ impl FutureStyleConnectionInner {
     &self.endpoints[self.endpoint_index.get()]
   }
 
-  #[inline]
-  fn build_url(endpoint: &str) -> String {
-    format!("ws://{}/$ws", endpoint)
-  }
-
   async fn connect(&self, endpoint: &String) -> Result<(Sink, Stream), AnyError> {
     let stream = TcpStream::connect(endpoint).await?;
     let req = HyperRequest::builder()
       .method("GET")
-      .uri(Self::build_url(endpoint))
+      .uri("/$ws")
       .header("Host", endpoint)
       .header(UPGRADE, "websocket")
       .header(CONNECTION, "upgrade")

@@ -266,7 +266,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
     let stream = TcpStream::connect(&self.endpoint).await?;
     let req = HyperRequest::builder()
       .method("GET")
-      .uri(Self::build_url(&self.endpoint))
+      .uri("/$ws")
       .header("Host", &self.endpoint)
       .header(UPGRADE, "websocket")
       .header(CONNECTION, "upgrade")
@@ -322,11 +322,6 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
   #[inline]
   fn is_stopping(&self) -> bool {
     self.is_stopping.get()
-  }
-
-  #[inline]
-  fn build_url(endpoint: &str) -> String {
-    format!("ws://{}/$ws", endpoint)
   }
 }
 
