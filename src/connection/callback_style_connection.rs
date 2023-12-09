@@ -200,7 +200,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
           }
           OpCode::Close => {
             log::error!(
-              "Disconnected: actor: {}<{}>, reason: {:?}",
+              "Disconnected: actor: {}<{}>, reason: {}",
               &self.endpoint,
               &self.id,
               Self::stringify(&frame.payload)
@@ -208,7 +208,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
             self.toggle_to_disconnected();
           }
           other => {
-            log::warn!("Received unknown msg: {:?}/{:?}", &other, &frame.payload);
+            log::warn!("Received unknown msg: {:?}({:?})", &frame.payload, &other);
           }
         },
         Err(err) => {
@@ -266,7 +266,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
   #[inline]
   fn stringify(payload: &Payload) -> String {
     match Self::decode_error_payload(payload) {
-      Ok(code) => format!("{}/{:?}", u16::from(code), code),
+      Ok(code) => format!("{:?}({})", code, u16::from(code)),
       Err(err) => format!("{:?}", err),
     }
   }

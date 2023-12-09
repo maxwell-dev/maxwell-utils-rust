@@ -265,7 +265,7 @@ impl FutureStyleConnectionInner {
           }
           OpCode::Close => {
             log::error!(
-              "Disconnected: actor: {}<{}>, reason: {:?}",
+              "Disconnected: actor: {}<{}>, reason: {}",
               &self.curr_endpoint(),
               &self.id,
               Self::stringify(&frame.payload)
@@ -273,7 +273,7 @@ impl FutureStyleConnectionInner {
             self.toggle_to_disconnected();
           }
           other => {
-            log::warn!("Received unknown msg: {:?}/{:?}", &other, &frame.payload);
+            log::warn!("Received unknown msg: {:?}({:?})", &frame.payload, &other);
           }
         },
         Err(err) => {
@@ -418,7 +418,7 @@ impl FutureStyleConnectionInner {
   #[inline]
   fn stringify(payload: &Payload) -> String {
     match Self::decode_error_payload(payload) {
-      Ok(code) => format!("{}/{:?}", u16::from(code), code),
+      Ok(code) => format!("{:?}({})", code, u16::from(code)),
       Err(err) => format!("{:?}", err),
     }
   }
