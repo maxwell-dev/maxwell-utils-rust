@@ -418,7 +418,7 @@ impl FutureStyleConnectionInner {
   #[inline]
   fn stringify(payload: &Payload) -> String {
     match Self::decode_error_payload(payload) {
-      Ok(code) => format!("{:?}", code),
+      Ok(code) => format!("{}/{:?}", u16::from(code), code),
       Err(err) => format!("{:?}", err),
     }
   }
