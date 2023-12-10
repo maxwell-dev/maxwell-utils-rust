@@ -247,7 +247,7 @@ impl FutureStyleConnectionInner {
         .stream
         .borrow_mut()
         .as_mut()
-        .unwrap() // send_fn is empty because we does not create obligated writes here.
+        .unwrap() // send_fn is empty because we do not create obligated writes here.
         .read_frame(&mut move |_| async { Ok::<_, WebSocketError>(()) })
         .await
       {
