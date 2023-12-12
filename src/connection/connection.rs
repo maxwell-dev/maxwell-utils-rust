@@ -16,7 +16,7 @@ pub struct ConnectionOptions {
 
 impl Default for ConnectionOptions {
   fn default() -> Self {
-    ConnectionOptions { reconnect_delay: 1000, mailbox_capacity: 64, max_frame_size: 134217728 }
+    ConnectionOptions { reconnect_delay: 1000, mailbox_capacity: 128, max_frame_size: 134217728 }
   }
 }
 
