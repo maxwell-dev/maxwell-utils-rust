@@ -4,7 +4,6 @@ use actix::{dev::ToEnvelope, prelude::*};
 use ahash::RandomState as AHasher;
 use dashmap::{mapref::entry::Entry, DashMap};
 
-// use triomphe::Arc;
 use super::{Connection, StopMsg};
 
 #[derive(Debug, Clone)]
@@ -165,7 +164,6 @@ mod tests {
   use actix::prelude::*;
   use tokio::time::sleep;
 
-  // use triomphe::Arc;
   use super::*;
   use crate::connection::*;
 
