@@ -14,11 +14,14 @@ use fastwebsockets::{
   WebSocketWrite,
 };
 use futures_intrusive::sync::LocalManualResetEvent;
+use http_body_util::Empty;
 use hyper::{
+  body::Bytes,
   header::{CONNECTION, UPGRADE},
   upgrade::Upgraded,
-  Body, Request as HyperRequest,
+  Request as HyperRequest,
 };
+use hyper_util::rt::TokioIo;
 use maxwell_protocol::{self, HandleError, ProtocolMsg, *};
 use tokio::{
   io::{split as tokio_split, ReadHalf, WriteHalf},
@@ -44,8 +47,8 @@ where
   }
 }
 
-type Sink = WebSocketWrite<WriteHalf<Upgraded>>;
-type Stream = FragmentCollectorRead<ReadHalf<Upgraded>>;
+type Sink = WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>;
+type Stream = FragmentCollectorRead<ReadHalf<TokioIo<Upgraded>>>;
 
 pub trait EventHandler: Send + Sync + Unpin + Sized + 'static {
   #[inline(always)]
@@ -298,7 +301,7 @@ impl<EH: EventHandler> CallbackStyleConnectionInner<EH> {
       .header("CLIENT-ID", &format!("{}", self.id))
       .header("Sec-WebSocket-Key", handshake::generate_key())
       .header("Sec-WebSocket-Version", "13")
-      .body(Body::empty())?;
+      .body(Empty::<Bytes>::new())?;
 
     let (mut ws, _) = handshake::client(&SpawnExecutor, req, stream).await?;
     ws.set_auto_close(false);
